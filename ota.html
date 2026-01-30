@@ -1,0 +1,173 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Device MQTT OTA (WSS)</title>
+   <script>
+  (function () {
+    const authed = localStorage.getItem("ota_auth") === "1";
+    const exp = Number(localStorage.getItem("ota_auth_exp") || "0");
+    const ok = authed && Date.now() < exp;
+
+    if (!ok) {
+      const next = encodeURIComponent(location.pathname.split("/").pop() || "ota.html");
+      location.replace("login.html?next=" + next);
+    }
+  })();
+  </script>
+  <style>
+    body { font-family: Arial; padding: 16px; max-width: 560px; margin: auto; }
+    input, button { width: 100%; padding: 10px; margin: 6px 0; }
+    progress { width: 100%; height: 18px; }
+    #log { height: 220px; overflow:auto; border:1px solid #ccc; padding:10px; }
+  </style>
+</head>
+<body>
+  <h2>Device OTA Upload via MQTT (WSS)</h2>
+
+  <label>WSS URL</label>
+  <input id="url" value="wss://smartdevices.saint-gobain.com:443/mqtt">
+
+  <label>Username</label>
+  <input id="user" value="YOUR_USERNAME">
+
+  <label>Password</label>
+  <input id="pass" type="password" value="YOUR_PASSWORD">
+
+  <label>Device ID (must match ESP32 topic)</label>
+  <input id="devid" value="esp32-sd-test-01">
+
+  <button onclick="connectMQTT()">Connect</button>
+  <button onclick="disconnectMQTT()">Disconnect</button>
+
+  <hr>
+
+  <label>Select firmware BIN</label>
+  <input id="file" type="file" accept=".bin">
+
+  <button onclick="uploadBin()">Upload BIN to ESP32</button>
+
+  <progress id="prog" value="0" max="100"></progress>
+
+  <h3>Log</h3>
+  <div id="log"></div>
+  <button onclick="localStorage.removeItem('ota_auth'); localStorage.removeItem('ota_auth_exp'); location.href='login.html';">
+    Logout
+  </button>
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+  <script>
+    let client = null;
+    let pendingAckResolve = null;
+
+    function log(t) {
+      const el = document.getElementById("log");
+      el.innerHTML += `<div>${new Date().toLocaleTimeString()} - ${t}</div>`;
+      el.scrollTop = el.scrollHeight;
+    }
+
+    function connectMQTT() {
+      const url = document.getElementById("url").value.trim();
+      const username = document.getElementById("user").value.trim();
+      const password = document.getElementById("pass").value;
+
+      client = mqtt.connect(url, {
+        username,
+        password,
+        clientId: "web_" + Math.random().toString(16).slice(2),
+        clean: true,
+        reconnectPeriod: 2000,
+      });
+
+      client.on("connect", () => log("✅ Connected (Web → WSS MQTT)"));
+      client.on("reconnect", () => log("🔁 Reconnecting..."));
+      client.on("error", (e) => log("❌ Error: " + e.message));
+
+      client.on("message", (topic, payload) => {
+        const msg = payload.toString();
+        // ACK handling
+        if (topic.endsWith("/ota/ack") && pendingAckResolve) {
+          pendingAckResolve(parseInt(msg));
+          pendingAckResolve = null;
+        }
+        log(`📩 ${topic} => ${msg}`);
+      });
+    }
+
+    function disconnectMQTT() {
+      if (client) {
+        client.end();
+        log("🛑 Disconnected");
+      }
+    }
+
+    function waitAck() {
+      return new Promise((resolve) => {
+        pendingAckResolve = resolve;
+      });
+    }
+
+    async function uploadBin() {
+      if (!client || !client.connected) {
+        alert("Connect MQTT first!");
+        return;
+      }
+
+      const fileInput = document.getElementById("file");
+      if (!fileInput.files.length) {
+        alert("Select a .bin file first!");
+        return;
+      }
+
+      const deviceId = document.getElementById("devid").value.trim();
+      const base = `test/${deviceId}`;  // ✅ base topic
+      const startTopic = `${base}/ota/start`;
+      const chunkTopic = `${base}/ota/chunk`;
+      const endTopic   = `${base}/ota/end`;
+      const ackTopic   = `${base}/ota/ack`;
+      const statusTopic= `${base}/ota/status`;
+
+      client.subscribe(ackTopic);
+      client.subscribe(statusTopic);
+
+      const file = fileInput.files[0];
+      const CHUNK_SIZE = 1024; // ✅ safe for WSS MQTT
+      let offset = 0;
+
+      document.getElementById("prog").value = 0;
+
+      // 1) Send START
+      client.publish(startTopic, JSON.stringify({ size: file.size }), { qos: 1 });
+      log(`🚀 OTA START sent (size=${file.size} bytes)`);
+
+      // 2) Send chunks
+      while (offset < file.size) {
+        const slice = file.slice(offset, offset + CHUNK_SIZE);
+        const buf = await slice.arrayBuffer();
+        const data = new Uint8Array(buf);
+
+        // Payload = [4 bytes offset] + data
+        const payload = new Uint8Array(4 + data.length);
+        payload[0] = (offset >> 24) & 0xFF;
+        payload[1] = (offset >> 16) & 0xFF;
+        payload[2] = (offset >> 8) & 0xFF;
+        payload[3] = (offset) & 0xFF;
+        payload.set(data, 4);
+
+        // publish chunk
+        client.publish(chunkTopic, payload, { qos: 1 });
+
+        // wait ACK from ESP32 (next expected offset)
+        const nextOffset = await waitAck();
+        offset = nextOffset;
+
+        const percent = Math.floor((offset / file.size) * 100);
+        document.getElementById("prog").value = percent;
+      }
+
+      // 3) Send END
+      client.publish(endTopic, "done", { qos: 1 });
+      log("✅ OTA END sent. ESP32 will reboot if successful.");
+    }
+  </script>
+</body>
+</html>

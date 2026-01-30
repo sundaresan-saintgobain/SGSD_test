@@ -1,0 +1,76 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>OTA Login</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: Arial; max-width: 520px; margin: 40px auto; padding: 16px; }
+    input, button { width: 100%; padding: 10px; margin: 8px 0; }
+    .card { border: 1px solid #ddd; padding: 18px; border-radius: 10px; }
+    .err { color: #b00020; }
+    .hint { color:#444; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>Login to OTA Page</h2>
+    <p>Enter credentials to access OTA upload page.</p>
+
+    <label>Username</label>
+    <input id="user" autocomplete="username" />
+
+    <label>Password</label>
+    <input id="pass" type="password" autocomplete="current-password" />
+
+    <button id="btn">Login</button>
+    <p id="msg" class="err"></p>
+
+    <p class="hint">
+      Note: This is only client-side protection (GitHub Pages). For real security, use Cloudflare Access / server auth.
+    </p>
+  </div>
+
+<script>
+  // ✅ CHANGE THESE
+  const ALLOWED_USER = "admin";
+
+  // Password you will TYPE in the box:  SDSG_WS_TEST123
+  // SHA-256(SDSG_WS_TEST123) =
+  const PASS_HASH_HEX = "4b21fda34029f0cc98c23521b0d48be337daae944f5b0cc7ea589ff358686eaa";
+
+  const qs = new URLSearchParams(location.search);
+  const next = qs.get("next") || "ota.html";
+
+  async function sha256Hex(str) {
+    const enc = new TextEncoder().encode(str);
+    const buf = await crypto.subtle.digest("SHA-256", enc);
+    return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join("");
+  }
+
+  async function doLogin() {
+    const u = document.getElementById("user").value.trim();
+    const p = document.getElementById("pass").value;
+    const msg = document.getElementById("msg");
+    msg.textContent = "";
+
+    if (!u || !p) { msg.textContent = "Enter username & password"; return; }
+    if (u !== ALLOWED_USER) { msg.textContent = "Invalid credentials"; return; }
+
+    const h = await sha256Hex(p);
+    if (h !== PASS_HASH_HEX) { msg.textContent = "Invalid credentials"; return; }
+
+    // ✅ Store a short-lived session (8 hours)
+    localStorage.setItem("ota_auth", "1");
+    localStorage.setItem("ota_auth_exp", String(Date.now() + 8 * 60 * 60 * 1000));
+
+    location.replace(next);
+  }
+
+  document.getElementById("btn").addEventListener("click", doLogin);
+  document.getElementById("pass").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") doLogin();
+  });
+</script>
+</body>
+</html>
